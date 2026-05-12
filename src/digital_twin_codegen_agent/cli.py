@@ -1,53 +1,126 @@
 import argparse
+import json
 import sys
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
+
+from .config import load_config
+from .llm import LLMClient
+from .pipeline import Pipeline
 
 load_dotenv()
 
 
+def _build_context_from_artifacts(artifacts_dir: Path) -> dict[str, Any]:
+    ctx: dict[str, Any] = {}
+
+    domain_inv = artifacts_dir / "domain_inventory.md"
+    if domain_inv.exists():
+        ctx["domain_inventory"] = domain_inv.read_text(encoding="utf-8")
+
+    spec_file = artifacts_dir / "digital_twin_spec.yaml"
+    if spec_file.exists():
+        ctx["spec_yaml"] = spec_file.read_text(encoding="utf-8")
+
+    design_file = artifacts_dir / "digital_twin_design.md"
+    if design_file.exists():
+        ctx["design_md"] = design_file.read_text(encoding="utf-8")
+
+    code_file = artifacts_dir / "generated_twin.py"
+    if code_file.exists():
+        ctx["generated_code"] = code_file.read_text(encoding="utf-8")
+
+    return ctx
+
+
+def _get_pipeline() -> Pipeline:
+    cfg = load_config()
+    llm = LLMClient(cfg)
+    return Pipeline(cfg, llm)
+
+
 def cmd_build_all(args: argparse.Namespace) -> None:
     docs_dir = Path(args.docs_dir).resolve()
-    print(f"[build-all] Running full pipeline on: {docs_dir}")
-    print("[build-all] Stage 1: analyze  -> not yet implemented")
-    print("[build-all] Stage 2: spec     -> not yet implemented")
-    print("[build-all] Stage 3: design   -> not yet implemented")
-    print("[build-all] Stage 4: generate -> not yet implemented")
-    print("[build-all] Stage 5: test     -> not yet implemented")
-    print("[build-all] Stage 6: review   -> not yet implemented")
-    print("[build-all] Pipeline complete.")
+    pipeline = _get_pipeline()
+    ctx = pipeline.build_all(docs_dir)
+
+    twin_path = pipeline.config.workspace_dir / "generated_twin" / "twin.py"
+    if twin_path.exists():
+        print("\n[cli] Running generated twin scenarios...")
+        from .execution.runner import TwinRunner
+
+        runner = TwinRunner(twin_path)
+        runner.load()
+
+        spec_yaml = ctx.get("spec_yaml", "")
+        if spec_yaml:
+            import yaml
+            spec_data = yaml.safe_load(spec_yaml)
+            scenarios = spec_data.get("scenarios", [])
+            if scenarios:
+                results = runner.run_all_scenarios(scenarios)
+                runner.print_report(results)
 
 
 def cmd_analyze(args: argparse.Namespace) -> None:
     docs_dir = Path(args.docs_dir).resolve()
-    print(f"[analyze] Document analysis on: {docs_dir}")
-    print("[analyze] Not yet implemented.")
+    pipeline = _get_pipeline()
+    pipeline.run_analyze(docs_dir, {})
+    print("[analyze] Done.")
 
 
 def cmd_spec(args: argparse.Namespace) -> None:
-    print("[spec] Spec generation from domain inventory.")
-    print("[spec] Not yet implemented.")
+    pipeline = _get_pipeline()
+    ctx = _build_context_from_artifacts(pipeline.config.artifacts_dir)
+    pipeline.run_spec(ctx)
+    print("[spec] Done.")
 
 
 def cmd_design(args: argparse.Namespace) -> None:
-    print("[design] Design generation from spec.")
-    print("[design] Not yet implemented.")
+    pipeline = _get_pipeline()
+    ctx = _build_context_from_artifacts(pipeline.config.artifacts_dir)
+    pipeline.run_design(ctx)
+    print("[design] Done.")
 
 
 def cmd_generate(args: argparse.Namespace) -> None:
-    print("[generate] Code generation from spec + design.")
-    print("[generate] Not yet implemented.")
+    pipeline = _get_pipeline()
+    ctx = _build_context_from_artifacts(pipeline.config.artifacts_dir)
+    pipeline.run_generate(ctx)
+    print("[generate] Done.")
 
 
 def cmd_test(args: argparse.Namespace) -> None:
-    print("[test] Test generation from spec + code.")
-    print("[test] Not yet implemented.")
+    pipeline = _get_pipeline()
+    ctx = _build_context_from_artifacts(pipeline.config.artifacts_dir)
+    pipeline.run_test(ctx)
+
+    twin_path = pipeline.config.workspace_dir / "generated_twin" / "twin.py"
+    if twin_path.exists():
+        print("\n[cli] Running generated twin scenarios...")
+        from .execution.runner import TwinRunner
+
+        runner = TwinRunner(twin_path)
+        runner.load()
+        spec_yaml = ctx.get("spec_yaml", "")
+        if spec_yaml:
+            import yaml
+            spec_data = yaml.safe_load(spec_yaml)
+            scenarios = spec_data.get("scenarios", [])
+            if scenarios:
+                results = runner.run_all_scenarios(scenarios)
+                runner.print_report(results)
+
+    print("[test] Done.")
 
 
 def cmd_review(args: argparse.Namespace) -> None:
-    print("[review] Review generated code against spec.")
-    print("[review] Not yet implemented.")
+    pipeline = _get_pipeline()
+    ctx = _build_context_from_artifacts(pipeline.config.artifacts_dir)
+    pipeline.run_review(ctx)
+    print("[review] Done.")
 
 
 def main() -> None:

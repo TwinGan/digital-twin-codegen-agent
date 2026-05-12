@@ -138,5 +138,5 @@ dmypy.json
 .LSOverride
 
 # Project specific
-# artifacts/
-# workspace/
+artifacts/
+workspace/

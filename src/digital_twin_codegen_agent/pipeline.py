@@ -163,11 +163,17 @@ class Pipeline:
         return ctx
 
     def run_review(self, ctx: dict[str, Any]) -> dict[str, Any]:
-        print("[review] Reviewing generated code...")
+        print("[review] Running programmatic coverage check...")
 
         spec_yaml = ctx.get("spec_yaml", "")
         generated_code = ctx.get("generated_code", "")
 
+        from .review.coverage import analyze_coverage
+        from .review.report import generate_report
+
+        coverage = analyze_coverage(spec_yaml, generated_code)
+
+        print("[review] Running LLM review...")
         system_prompt = self._load_prompt("06_reviewer.md")
         user_prompt = (
             "Review the following digital twin implementation against the spec.\n\n"
@@ -175,12 +181,15 @@ class Pipeline:
             f"## Generated Code\n\n```python\n{generated_code}\n```\n\n"
             "## Invariants\n\n" + ctx.get("invariants_md", "")
         )
+        llm_review = self.llm.call(system_prompt, user_prompt)
 
-        review_output = self.llm.call(system_prompt, user_prompt)
-        self.writer.write("review_report.md", review_output)
-        print("[review] Wrote artifacts/review_report.md")
+        print("[review] Generating combined report...")
+        report = generate_report(coverage, llm_review)
+        self.writer.write("review_report.md", report.formatted)
+        print(f"[review] Wrote artifacts/review_report.md ({'PASS' if report.passed else 'FAIL'})")
 
-        ctx["review_report"] = review_output
+        ctx["review_report"] = report.formatted
+        ctx["review_passed"] = report.passed
         return ctx
 
     def build_all(self, docs_dir: Path) -> dict[str, Any]:

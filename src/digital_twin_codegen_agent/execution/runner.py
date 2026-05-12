@@ -6,6 +6,91 @@ from pathlib import Path
 from typing import Any
 
 
+def _normalize_scenarios(scenarios: Any) -> list[dict[str, Any]]:
+    if isinstance(scenarios, dict):
+        result: list[dict[str, Any]] = []
+        for name, steps in scenarios.items():
+            result.append({"name": name, "steps": _normalize_steps(steps)})
+        return result
+    if isinstance(scenarios, list):
+        result = []
+        for item in scenarios:
+            if isinstance(item, dict):
+                name = item.get("name", item.get("description", "unnamed"))
+                steps = item.get("steps", item) if "steps" in item else [item]
+                result.append({"name": name, "steps": _normalize_steps(steps)})
+            else:
+                result.append({"name": str(item), "steps": []})
+        return result
+    return []
+
+
+def _normalize_steps(steps: Any) -> list[dict[str, Any]]:
+    if not isinstance(steps, list):
+        steps = [steps]
+
+    normalized: list[dict[str, Any]] = []
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+
+        if "command" in step:
+            step["expected_state"] = _yaml_str(step.get("expected_state", ""))
+            normalized.append(step)
+            continue
+
+        if "when" in step:
+            when = step["when"]
+            command = when.get("command", "")
+            if "(" in command:
+                command, _ = command.split("(", 1)
+
+            params_str = ""
+            if "(" in when.get("command", ""):
+                _, params_str = when["command"].split("(", 1)
+                params_str = params_str.rstrip(")")
+
+            params = {}
+            if params_str:
+                params_str = params_str.strip().strip('"').strip("'")
+                if params_str:
+                    params["light_id"] = params_str
+
+            then = step.get("then", {})
+            expected_events = then.get("events", [])
+            expected_state = _yaml_str(then.get("new_state", ""))
+            expected_error = then.get("error", "")
+
+            normalized.append({
+                "command": command,
+                "params": params,
+                "expected_events": expected_events if isinstance(expected_events, list) else [expected_events],
+                "expected_state": expected_state,
+                "expected_error": expected_error,
+                "given": step.get("given", {}),
+            })
+
+    return normalized
+
+
+def _yaml_str(val: Any) -> str:
+    if isinstance(val, bool):
+        return "on" if val else "off"
+    return str(val) if val else ""
+
+
+def _extract_givens(steps: list[dict[str, Any]]) -> dict[str, Any]:
+    givens: dict[str, Any] = {}
+    for step in steps:
+        given = step.get("given", {})
+        if isinstance(given, dict):
+            light_id = given.get("light_id", given.get("id", ""))
+            state = _yaml_str(given.get("state", ""))
+            if light_id and state:
+                givens[light_id] = state
+    return givens
+
+
 @dataclass
 class StepResult:
     command: str
@@ -24,6 +109,8 @@ class TwinRunner:
     def __init__(self, twin_module_path: Path):
         self.twin_module_path = twin_module_path
         self._twin_instance: Any = None
+        self._twin_cls: type | None = None
+        self._module: Any = None
 
     def load(self) -> Any:
         if not self.twin_module_path.exists():
@@ -51,20 +138,39 @@ class TwinRunner:
                 f"Expected one of: {twin_attrs}"
             )
 
+        self._twin_cls = twin_cls
+        self._module = module
+        self._twin_instance = self._instantiate(twin_cls)
+
+        print(f"[runner] Loaded twin: {twin_cls.__name__}")
+        return self._twin_instance
+
+    def _instantiate(self, twin_cls: type, initial_state: dict[str, Any] | None = None) -> Any:
+        if initial_state:
+            try:
+                return twin_cls(lights=initial_state)
+            except TypeError:
+                try:
+                    return twin_cls(initial_state)
+                except Exception:
+                    pass
         try:
-            self._twin_instance = twin_cls()
+            return twin_cls()
         except TypeError:
             try:
                 from types import SimpleNamespace
-                self._twin_instance = twin_cls(SimpleNamespace(**{}), SimpleNamespace(**{}))
+                return twin_cls(SimpleNamespace(**{}), SimpleNamespace(**{}))
             except Exception:
                 raise RuntimeError(
                     f"Could not instantiate {twin_cls.__name__}. "
                     "Make sure TwinEngine has a no-arg __init__ or handle constructor args."
                 )
 
-        print(f"[runner] Loaded twin: {twin_cls.__name__}")
-        return self._twin_instance
+    def reinit(self, initial_state: dict[str, Any] | None = None) -> None:
+        if self._twin_cls is None:
+            self.load()
+        assert self._twin_cls is not None
+        self._twin_instance = self._instantiate(self._twin_cls, initial_state)
 
     def dispatch(self, command: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         if self._twin_instance is None:
@@ -175,11 +281,17 @@ class TwinRunner:
 
         return results
 
-    def run_all_scenarios(self, scenarios: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def run_all_scenarios(self, scenarios: list[dict[str, Any]] | dict[str, Any]) -> list[dict[str, Any]]:
+        normalized = _normalize_scenarios(scenarios)
         all_results: list[dict[str, Any]] = []
-        for scenario in scenarios:
+
+        for scenario in normalized:
             name = scenario.get("name", scenario.get("description", "unnamed"))
             steps = scenario.get("steps", [])
+
+            initial_state = _extract_givens(steps)
+            self.reinit(initial_state if initial_state else None)
+
             step_results = self.run_scenario_steps(steps)
             scenario_passed = all(sr.passed for sr in step_results)
             all_results.append({

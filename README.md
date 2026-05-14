@@ -25,9 +25,11 @@ An LLM-powered agent pipeline that automatically generates a **digital twin** �
               [Stage 5: Test] ◄─────────┘  ──→ test_twin.py + Runner Report
                     │
               [Stage 6: Review] ◄─────────┘  ──→ review_report.md
+                    │
+              [Stage 7: Fuzz-Gen] ◄──────┘  ──→ fuzz_testcases.py
 ```
 
-Six sequential LLM-driven stages, each consuming the previous stage's output. Run the full pipeline or any individual stage.
+Seven sequential LLM-driven stages, each consuming the previous stage's output. Run the full pipeline or any individual stage.
 
 ## Installation
 
@@ -65,7 +67,7 @@ The agent uses the OpenAI-compatible SDK. Set `OPENAI_API_BASE_URL` to any compa
 dt-codegen build-all ./my_docs
 ```
 
-Runs all 6 stages sequentially and writes outputs to `artifacts/` and `workspace/`.
+Runs all 7 stages sequentially and writes outputs to `artifacts/` and `workspace/`.
 
 ### Individual Stages
 
@@ -87,6 +89,9 @@ dt-codegen test
 
 # Stage 6: Review generated code → audit report (coverage, invariants, fidelity)
 dt-codegen review
+
+# Stage 7: Generate fuzz testcase module → twin-as-oracle CSV export
+dt-codegen input-gen
 ```
 
 Individual stages resume from existing artifacts on disk — you can re-run any stage without re-running previous ones.
@@ -101,24 +106,26 @@ dt-codegen design                  Generate architecture design
 dt-codegen generate                Generate twin implementation
 dt-codegen test                    Generate tests + run scenarios
 dt-codegen review                  Review generated code against spec
+dt-codegen input-gen               Generate fuzz testcase module
 ```
 
 ## Project Structure
 
 ```
-├── prompts/                          # LLM system prompts (6 stages)
+├── prompts/                          # LLM system prompts (7 stages)
 │   ├── 01_document_analyzer.md       # Domain extraction from PRD
 │   ├── 02_spec_generator.md          # Behavioral spec YAML generation
 │   ├── 03_design_generator.md        # Architecture design
 │   ├── 04_codegen.md                 # Twin code generation
 │   ├── 05_test_generator.md          # Test code generation
-│   └── 06_reviewer.md                # Code review / audit
+│   ├── 06_reviewer.md                # Code review / audit
+│   └── 07_input_generator.md         # Fuzz testcase module generation
 │
 ├── src/digital_twin_codegen_agent/   # Source code
 │   ├── cli.py                        # CLI entry point (argparse)
 │   ├── config.py                     # .env loader + Config dataclass
 │   ├── llm.py                        # OpenAI-compatible LLM client
-│   ├── pipeline.py                   # Pipeline orchestrator (6 stages)
+│   ├── pipeline.py                   # Pipeline orchestrator (7 stages)
 │   ├── documents/
 │   │   ├── loader.py                 # Load .md/.txt files from directory
 │   │   └── chunker.py                # Heading-aware document chunking
@@ -141,11 +148,13 @@ dt-codegen review                  Review generated code against spec
 │   ├── digital_twin_spec.yaml
 │   ├── digital_twin_design.md
 │   ├── generated_twin.py
+│   ├── fuzz_testcases.py
 │   └── review_report.md
 │
 ├── workspace/generated_twin/         # Generated twin code
 │   ├── twin.py                       # TwinEngine implementation
-│   └── test_twin.py                  # Auto-generated test suite
+│   ├── test_twin.py                  # Auto-generated test suite
+│   └── fuzz_testcases.py             # Fuzz testcase module (twin-as-oracle CSV export)
 │
 ├── docs/                             # Sample PRD documents
 ├── pyproject.toml                    # Project metadata + dependencies
@@ -214,6 +223,54 @@ Example (`docs/light_switch_prd.md`):
 1. turn_on("kitchen") → state=on
 2. turn_on("kitchen") → error=already_on
 ```
+
+## Fuzz Testcase Generation (Stage 7)
+
+After the twin is validated by Stage 5 (Test) and Stage 6 (Review), Stage 7 generates a standalone `fuzz_testcases.py` module that uses the twin as a **test oracle** to mass-produce labeled test data:
+
+```
+┌─────────────────┐     ┌──────────────────┐     ┌──────────────────┐
+│   Spec YAML     │────▶│  Bake-in COMMANDS│────▶│  Random Mutation │
+│  (commands,     │     │  dict into module│     │  of valid params │
+│   params)       │     └──────────────────┘     └────────┬─────────┘
+└─────────────────┘                                       │
+                                                  ┌───────▼─────────┐
+                                                  │ Multi-step      │
+                                                  │ sequences       │
+                                                  │ (twin-as-oracle)│
+                                                  └───────┬─────────┘
+                                                          │
+                                                  ┌───────▼─────────┐
+                                                  │  CSV Export     │
+                                                  │  input → expect │
+                                                  └─────────────────┘
+```
+
+**Key features:**
+- **Twin-as-oracle**: The validated digital twin produces expected results for comparison against real system output
+- **Random fuzz**: Randomly selects valid commands and mutates params within defined domains
+- **Multi-step sequences**: Captures stateful behavior flows (1-5 steps per sequence)
+- **Reproducible**: `--seed` flag ensures identical output across runs
+- **CSV export**: Export labeled test data for real-system comparison testing
+
+```bash
+# Generate the fuzz module (via LLM)
+dt-codegen input-gen
+
+# Run the module: 100 sequences, seeded for reproducibility
+python workspace/generated_twin/fuzz_testcases.py --count 100 --seed 42 --output testcases.csv
+
+# Dry-run: preview generated sequences without twin execution
+python workspace/generated_twin/fuzz_testcases.py --count 5 --dry-run
+```
+
+**CSV output format:**
+
+```
+sequence_id | step | command | params_json | expected_events_json | expected_state | expected_error
+```
+
+Each row is one step in a multi-step sequence, linked by `sequence_id`. The CSV can be fed into real-system comparison tools.
 
 ## Running Tests Against the Twin
 

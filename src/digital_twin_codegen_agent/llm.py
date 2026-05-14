@@ -11,7 +11,7 @@ class LLMClient:
             base_url=config.base_url,
         )
 
-    def call(self, system_prompt: str, user_prompt: str) -> str:
+    def call(self, system_prompt: str, user_prompt: str, max_tokens: int | None = None) -> str:
         from openai.types.chat import ChatCompletion
 
         response = self.client.chat.completions.create(
@@ -20,7 +20,7 @@ class LLMClient:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            max_tokens=self.config.max_tokens,
+            max_tokens=max_tokens or self.config.max_tokens,
             temperature=self.config.temperature,
             stream=False,
         )

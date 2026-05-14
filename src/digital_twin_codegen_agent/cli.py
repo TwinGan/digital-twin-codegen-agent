@@ -123,6 +123,13 @@ def cmd_review(args: argparse.Namespace) -> None:
     print("[review] Done.")
 
 
+def cmd_input_gen(args: argparse.Namespace) -> None:
+    pipeline = _get_pipeline()
+    ctx = _build_context_from_artifacts(pipeline.config.artifacts_dir)
+    pipeline.run_input_generator(ctx)
+    print("[input-gen] Done.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="dt-codegen",
@@ -152,6 +159,9 @@ def main() -> None:
 
     parser_review = subparsers.add_parser("review", help="Review generated code against spec")
     parser_review.set_defaults(func=cmd_review)
+
+    parser_input_gen = subparsers.add_parser("input-gen", help="Generate fuzz testcase module")
+    parser_input_gen.set_defaults(func=cmd_input_gen)
 
     if len(sys.argv) == 1:
         parser.print_help()

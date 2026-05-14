@@ -226,14 +226,19 @@ class Pipeline:
                 "## Invariants\n\n" + ctx.get("invariants_md", "")
             )
             if polish_hints:
-                user_prompt += f"\n\n{polish_hints}"
+                user_prompt += (
+                    f"\n\n## Polish Instructions\n"
+                    f"Fix the following issues in your code output. "
+                    f"Output ONLY the complete fixed Python code (no markdown, no explanations):\n"
+                    f"{polish_hints}"
+                )
 
-            code_output = self.llm.call(system_prompt, user_prompt)
-            code = _extract_block(code_output, "```python") or code_output
+            code_output = self.llm.call(system_prompt, user_prompt, max_tokens=32768)
+            code = _extract_code(code_output)
 
             self.writer.write_generated_code("twin.py", code, self.config.workspace_dir)
             self.writer.write("generated_twin.py", code)
-            print("[generate] Wrote workspace/generated_twin/twin.py")
+            print(f"[generate] Wrote workspace/generated_twin/twin.py ({len(code)} chars)")
 
             ctx["generated_code"] = code
             return ctx
@@ -264,10 +269,15 @@ class Pipeline:
                 f"## Twin Implementation\n\n```python\n{generated_code}\n```"
             )
             if polish_hints:
-                user_prompt += f"\n\n{polish_hints}"
+                user_prompt += (
+                    f"\n\n## Polish Instructions\n"
+                    f"Fix the following issues in your test code output. "
+                    f"Output ONLY the complete fixed Python test code (no markdown, no explanations):\n"
+                    f"{polish_hints}"
+                )
 
-            test_output = self.llm.call(system_prompt, user_prompt)
-            test_code = _extract_block(test_output, "```python") or test_output
+            test_output = self.llm.call(system_prompt, user_prompt, max_tokens=16384)
+            test_code = _extract_code(test_output)
 
             self.writer.write_generated_code("test_twin.py", test_code, self.config.workspace_dir)
             print("[test] Wrote workspace/generated_twin/test_twin.py")
@@ -323,40 +333,88 @@ class Pipeline:
             output_key="review_report",
         )
 
+    # ---- Stage 7: Input Generator ----
+
+    def run_input_generator(self, ctx: dict[str, Any]) -> dict[str, Any]:
+        def _run(ctx: dict[str, Any], polish_hints: str) -> dict[str, Any]:
+            print("[input-gen] Generating fuzz input module...")
+
+            spec_yaml = ctx.get("spec_yaml", "")
+            generated_code = ctx.get("generated_code", "")
+
+            system_prompt = self._load_prompt("07_input_generator.md") if (
+                self.config.prompts_dir / "07_input_generator.md").exists() else (
+                "You are an input generation agent. Generate a fuzz testcase module."
+            )
+
+            user_prompt = (
+                "Generate a standalone Python fuzz testcase module for the digital twin below.\n\n"
+                f"## Spec\n\n```yaml\n{spec_yaml}\n```\n\n"
+                f"## Twin Implementation\n\n```python\n{generated_code}\n```"
+            )
+            if polish_hints:
+                user_prompt += (
+                    f"\n\n## Polish Instructions\n"
+                    f"Fix the following issues in your module output. "
+                    f"Output ONLY the complete fixed Python code (no markdown, no explanations):\n"
+                    f"{polish_hints}"
+                )
+
+            fuzz_output = self.llm.call(system_prompt, user_prompt, max_tokens=32768)
+            fuzz_code = _extract_code(fuzz_output)
+
+            self.writer.write_generated_code("fuzz_testcases.py", fuzz_code, self.config.workspace_dir)
+            self.writer.write("fuzz_testcases.py", fuzz_code)
+            print(f"[input-gen] Wrote workspace/generated_twin/fuzz_testcases.py ({len(fuzz_code)} chars)")
+
+            ctx["fuzz_module_code"] = fuzz_code
+            return ctx
+
+        return self._run_with_evaluation(
+            "input-gen", _run, ctx,
+            input_keys=["spec_yaml", "generated_code"],
+            output_key="fuzz_module_code",
+        )
+
     # ---- Build All ----
 
     def build_all(self, docs_dir: Path) -> dict[str, Any]:
         ctx: dict[str, Any] = {}
 
         print("=" * 50)
-        print("[pipeline] Stage 1/6: Document Analysis")
+        print("[pipeline] Stage 1/7: Document Analysis")
         print("=" * 50)
         ctx = self.run_analyze(docs_dir, ctx)
 
         print("\n" + "=" * 50)
-        print("[pipeline] Stage 2/6: Spec Generation")
+        print("[pipeline] Stage 2/7: Spec Generation")
         print("=" * 50)
         ctx = self.run_spec(ctx)
 
         print("\n" + "=" * 50)
-        print("[pipeline] Stage 3/6: Design Generation")
+        print("[pipeline] Stage 3/7: Design Generation")
         print("=" * 50)
         ctx = self.run_design(ctx)
 
         print("\n" + "=" * 50)
-        print("[pipeline] Stage 4/6: Code Generation")
+        print("[pipeline] Stage 4/7: Code Generation")
         print("=" * 50)
         ctx = self.run_generate(ctx)
 
         print("\n" + "=" * 50)
-        print("[pipeline] Stage 5/6: Test Generation")
+        print("[pipeline] Stage 5/7: Test Generation")
         print("=" * 50)
         ctx = self.run_test(ctx)
 
         print("\n" + "=" * 50)
-        print("[pipeline] Stage 6/6: Review")
+        print("[pipeline] Stage 6/7: Review")
         print("=" * 50)
         ctx = self.run_review(ctx)
+
+        print("\n" + "=" * 50)
+        print("[pipeline] Stage 7/7: Fuzz Input Generation")
+        print("=" * 50)
+        ctx = self.run_input_generator(ctx)
 
         print("\n[pipeline] Done. All artifacts written to artifacts/ and workspace/")
         return ctx
@@ -371,6 +429,30 @@ def _extract_block(text: str, marker: str) -> str:
     if end != -1:
         block = block[:end]
     return block.strip()
+
+
+def _extract_code(text: str) -> str:
+    fenced = _extract_block(text, "```python") or _extract_block(text, "```")
+    if fenced and len(fenced) > 100:
+        return fenced
+
+    lines = text.splitlines()
+    code_lines: list[str] = []
+    in_code = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("class ") or stripped.startswith("def ") or stripped.startswith("import ") or stripped.startswith("from "):
+            in_code = True
+        if in_code:
+            code_lines.append(line)
+
+    if code_lines and len(code_lines) > 5:
+        return "\n".join(code_lines)
+
+    if text.strip().startswith("class ") or text.strip().startswith("import ") or text.strip().startswith("from "):
+        return text.strip()
+
+    return text.strip()
 
 
 def _filter_suggestions(suggestions: list[str]) -> list[str]:

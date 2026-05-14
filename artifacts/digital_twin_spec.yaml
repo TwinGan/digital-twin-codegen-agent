@@ -1,0 +1,552 @@
+digital_twin_spec:
+  name: "Historical Market Data PCAP Pipeline"
+  version: "1.0"
+  description: >
+    Digital twin of the pipeline that downloads, validates, and distributes
+    binary historical tick data (PCAP) from exchange feeds.
+
+  entities:
+    - id: Feed
+      description: >
+        A logical data channel with redundancy. A-FEED and B-FEED capture
+        identical market data from separate network paths.
+      properties:
+        feedId:
+          type: string
+          enum: ["A-FEED", "B-FEED"]
+          description: Canonical feed identifier.
+        corvilChannel:
+          type: string
+          description: >
+            Corvil channel name used to retrieve PCAPs.
+            Example: v4-DC1-AFEED-LMENet-Inside for A-FEED.
+          sourcedFrom: PRD §4.2 (Data source module)
+      supported:
+        - A-FEED and B-FEED are the only valid feeds; any other value is out-of-scope.
+
+    - id: MessageCode
+      description: >
+        Subset of messages within a feed that are captured separately.
+        Four codes exist, each combining feed (A/B) and order depth (L2/L3).
+      properties:
+        code:
+          type: string
+          enum:
+            - "FEED_A_CORE_L2_DC1"
+            - "FEED_A_CORE_L3_DC1"
+            - "FEED_B_CORE_L2_DC1"
+            - "FEED_B_CORE_L3_DC1"
+          description: >
+            Standardised message code identifier.
+      supported:
+        - Only the four listed codes are in scope.
+
+    - id: BusinessDay
+      description: >
+        A trading day defined as any weekday that is not a UK public holiday.
+        The holiday calendar is maintained manually.
+      properties:
+        date:
+          type: string
+          format: date
+        isHoliday:
+          type: boolean
+      supported:
+        - Only dates matching the manual calendar are valid business days.
+        - Weekends are never business days.
+      outOfScope:
+        - Automatic holiday detection or dynamic calendar integration.
+
+    - id: PCAPFile
+      description: >
+        A raw packet capture file retrieved from the Corvil platform,
+        containing market data for one business day, for a specific feed
+        and message code.
+      properties:
+        feedId:
+          $ref: "Feed.feedId"
+        messageCode:
+          $ref: "MessageCode.code"
+        businessDay:
+          $ref: "BusinessDay.date"
+        filename:
+          type: string
+          pattern: "LMEFTcad_yyyymmdd.zip"
+          description: >
+            Naming convention where 'cad' is the metal abbreviation
+            (example placeholder).
+        size:
+          type: integer
+          description: File size in bytes.
+        state:
+          type: string
+          enum: ["not_downloaded", "downloaded", "validated_pass",
+                 "validated_fail", "uploaded", "archived"]
+          description: Current lifecycle state.
+        validationResult:
+          $ref: "ValidationResult"
+          description: Set after validation job completes.
+      supported:
+        - Files are uniquely identified by (feedId, messageCode, businessDay).
+        - Allowed states follow the pipeline dependency chain.
+
+    - id: ValidationResult
+      description: >
+        Outcome of the multi‑level checks on a PCAP file.
+      properties:
+        fileLevel:
+          type: string
+          enum: ["pass", "fail"]
+          description: File size within expected operational range.
+        protocolLevel:
+          type: string
+          enum: ["pass", "fail"]
+          details:
+            ethernet: "Ethernet header present and compliant"
+            vlan: "VLAN tagging valid per network specification"
+            ipv4: "IPv4 header well‑formed"
+            udp: "UDP structure correct"
+        packetLevel:
+          type: string
+          enum: ["pass", "fail"]
+          details:
+            packetSize: "Consistent with expected length"
+            payloadIntegrity: "Checksum/verification passed"
+            messageTypeDistribution: "Distribution analysed (no numeric threshold)"
+            marketStateIdentifiable: "Market State Message Types found"
+        emptyFile:
+          type: string
+          enum: ["normal_holiday", "exception_nonholiday", "not_empty"]
+          description: >
+            Behaviour when the PCAP is empty:
+            - On a public holiday → normal (no error)
+            - On a non‑holiday → exception
+        overall:
+          type: string
+          enum: ["pass", "fail", "empty_normal"]
+          description: >
+            Aggregated outcome:
+            - pass if all checks pass
+            - fail if any check fails
+            - empty_normal if file is empty on holiday (treated as pass for pipeline)
+      supported:
+        - Validation runs only on downloaded files.
+
+    - id: Job
+      description: >
+        A scheduled or on‑demand execution of a processing step
+        (download, validate, upload, archive).
+      properties:
+        jobId:
+          type: string
+        type:
+          type: string
+          enum: ["download", "validate", "upload", "archive"]
+        parameters:
+          type: object
+          properties:
+            feedId: { $ref: "Feed.feedId" }
+            messageCode: { $ref: "MessageCode.code" }
+            businessDay: { $ref: "BusinessDay.date" }
+        state:
+          type: string
+          enum: ["triggered", "running", "succeeded", "failed"]
+      supported:
+        - Jobs are triggered via cron or HTTP API.
+        - Only one instance of a job for the same parameters may run at a time (inferred).
+
+    - id: MarketStateEvent
+      description: >
+        A specific message type inside the PCAP that records
+        contract‑level trading state transitions (e.g., opening,
+        continuous, closing).
+      properties:
+        feedId: { $ref: "Feed.feedId" }
+        messageCode: { $ref: "MessageCode.code" }
+        businessDay: { $ref: "BusinessDay.date" }
+        transitions:
+          type: array
+          description: List of trading state changes for the day.
+
+    - id: GrafanaDashboard
+      description: >
+        Visualises pipeline health and trading state aggregates.
+        Updated after validation.
+
+    - id: Notification
+      description: >
+        Email alerts sent to technical or business teams based on
+        pipeline events.
+      properties:
+        recipientGroup:
+          type: string
+          enum: ["technical_team", "business_team"]
+        alertType:
+          type: string
+          enum:
+            - "download_failure"
+            - "validation_failure"
+            - "empty_nonholiday"
+            - "upload_failure"
+            - "other_exception"
+
+  commands:
+    - id: TriggerExportJob
+      description: >
+        Internal HTTP API to start a PCAP export (download) job.
+      request:
+        method: GET
+        path: /pcap/export
+        parameters:
+          feedId: { $ref: "Feed.feedId" }
+          messageCodes:
+            type: array of MessageCode.code
+            required: no
+          businessDay:
+            type: string
+            format: date
+            required: no
+      responses:
+        "200":
+          description: Job triggered (null body)
+          effects: >
+            Creates a Job entity with type=download, state=triggered.
+        "500":
+          description: Job failed to trigger
+          effects: >
+            No Job created; alert may be raised.
+      triggers:
+        - internal user (e.g., Temper team)
+
+    - id: TriggerValidationJob
+      description: >
+        Internal HTTP API to start a validation job for an already
+        downloaded PCAP.
+      request:
+        method: GET
+        path: /pcap/validation
+        parameters:
+          feedId: { $ref: "Feed.feedId" }
+          messageCodes:
+            type: array
+            required: no
+            notes: "Not currently used in logic"
+          businessDay:
+            type: string
+            format: date
+            required: no
+      responses:
+        "200":
+          description: Job triggered (null body)
+          effects: >
+            Creates a Job entity with type=validate, state=triggered.
+        "500":
+          description: Validation job failed to trigger
+      triggers:
+        - internal user or cron
+
+    - id: CronDownloadTask
+      description: >
+        Scheduled to run on the next calendar day after a business day,
+        downloads PCAPs for A‑FEED / B‑FEED and all message codes.
+      schedule: "next day after business day"
+      effects: >
+        For each valid (feed, code) pair, creates a download Job.
+      outOfScope:
+        - Exact cron expressions; assumed configurable.
+
+    - id: CronValidationTask
+      description: >
+        Runs after download completes (max 1 hour delay) for the same
+        business day.
+      schedule: "1 hour after download task completion"
+      effects: >
+        For each downloaded file, creates a validation Job.
+
+    - id: CronUploadTask
+      description: >
+        Runs after successful validation, transfers files to the
+        distribution platform.
+      schedule: "after validation task completion"
+      effects: >
+        For each file with state validated_pass, creates an upload Job.
+
+    - id: CronArchivePurgeTask
+      description: >
+        Manages lifecycle of PCAP files on PV storage (once a day).
+      schedule: "daily"
+      effects: >
+        Transitions uploaded files to archived, and removes files
+        beyond retention (exact retention policy TBC).
+
+  events:
+    - id: JobTriggered
+      payload:
+        jobId: string
+        type: string
+        parameters: object
+    - id: JobSucceeded
+      payload:
+        jobId: string
+        type: string
+        outputDescription: string
+    - id: JobFailed
+      payload:
+        jobId: string
+        type: string
+        error: string
+    - id: DownloadFailureAlert
+      recipients: technical_team
+      trigger: JobFailed (download type)
+    - id: ValidationFailureAlert
+      recipients: technical_team
+      trigger: >
+        JobFailed (validate type) and PCAPFile.validationResult.overall = fail
+    - id: EmptyFileNonHolidayAlert
+      recipients: business_team
+      trigger: >
+        PCAPFile.validationResult.emptyFile = exception_nonholiday
+    - id: EmptyFileHolidayNormal
+      description: no alert
+      trigger: >
+        PCAPFile.validationResult.emptyFile = normal_holiday
+    - id: UploadFailureAlert
+      recipients: technical_team
+      trigger: JobFailed (upload type)
+    - id: OtherExceptionAlert
+      recipients: technical_team
+      trigger: any unclassified exception
+    - id: MarketStateEventsRecorded
+      payload:
+        events: array of MarketStateEvent
+    - id: DashboardUpdated
+      payload:
+        businessDay: string
+        tradingStates: object
+
+  states:
+    PCAPFile:
+      initial: not_downloaded
+      transitions:
+        - from: not_downloaded
+          to: downloaded
+          trigger: JobSucceeded (download)
+          condition: >
+            Download job for the exact (feedId, messageCode, businessDay)
+            completed without errors.
+        - from: downloaded
+          to: validated_pass
+          trigger: JobSucceeded (validate)
+          condition: >
+            ValidationResult.overall = pass
+        - from: downloaded
+          to: validated_fail
+          trigger: JobSucceeded (validate)
+          condition: >
+            ValidationResult.overall = fail
+        - from: validated_fail
+          to: downloaded
+          description: >
+            A new download may be triggered, resetting to downloaded
+            before re‑validation. (Operational re‑run)
+          trigger: JobSucceeded (download)
+        - from: validated_pass
+          to: uploaded
+          trigger: JobSucceeded (upload)
+        - from: uploaded
+          to: archived
+          trigger: JobSucceeded (archive)
+
+    Job:
+      initial: triggered
+      transitions:
+        - from: triggered
+          to: running
+          trigger: system picks up job
+        - from: running
+          to: succeeded
+          trigger: internal processing completes successfully
+        - from: running
+          to: failed
+          trigger: internal processing encounters error
+
+  validation_rules:
+    # These are applied during the validation job.
+    fileLevel:
+      - name: FileSizeWithinRange
+        description: >
+          PCAP file size must fall within an expected operational range.
+          (Exact boundaries defined operationally, TBC.)
+        check: size in range
+        onFail: set fileLevel = fail
+
+    protocolLevel:
+      - name: EthernetHeader
+        check: Ethernet header present and compliant
+        onFail: set protocolLevel = fail
+      - name: VLANTagging
+        check: VLAN tagging valid per network spec
+        onFail: set protocolLevel = fail
+      - name: IPv4Header
+        check: IPv4 header well‑formed
+        onFail: set protocolLevel = fail
+      - name: UDPStructure
+        check: UDP protocol structure correct
+        onFail: set protocolLevel = fail
+
+    packetLevel:
+      - name: PacketSizeConsistency
+        check: each packet size consistent with expected length
+        onFail: set packetLevel = fail
+      - name: PayloadIntegrity
+        check: checksum / other verification passes
+        onFail: set packetLevel = fail
+      - name: MessageTypeDistribution
+        check: >
+          Distribution of message types is analysed.
+          (No fixed threshold; used for observability.)
+        onFail: set packetLevel = fail # if genuinely malformed
+      - name: MarketStateIdentifiable
+        check: >
+          Market State Message Types are found and can be extracted.
+        onFail: set packetLevel = fail
+
+    emptyFile:
+      - name: EmptyFileHoliday
+        condition: file size = 0 AND BusinessDay.isHoliday = true
+        action: set emptyFile = normal_holiday, overall = empty_normal
+      - name: EmptyFileNonHoliday
+        condition: file size = 0 AND BusinessDay.isHoliday = false
+        action: set emptyFile = exception_nonholiday, overall = fail
+
+    overall:
+      - compute from fileLevel, protocolLevel, packetLevel, emptyFile
+      - if any fail → overall = fail
+      - if emptyFile = normal_holiday → overall = empty_normal
+      - else overall = pass
+
+  invariants:
+    - id: INV-1
+      statement: >
+        All data retrieved from Corvil corresponds to UK Time
+        [00:00:00 – 23:59:59] of the specified business day.
+      source: PRD §4.2 (Data source module)
+    - id: INV-2
+      statement: >
+        The cron download job must start on the next calendar day after
+        the business day, never on the same day.
+      source: PRD §4.2 (Job execution module)
+    - id: INV-3
+      statement: >
+        Only two feeds (A-FEED, B-FEED) and four message codes
+        (FEED_A_CORE_L2_DC1, FEED_A_CORE_L3_DC1, FEED_B_CORE_L2_DC1,
+        FEED_B_CORE_L3_DC1) are valid. Downloads are per feed and per code.
+      source: PRD §4.2
+    - id: INV-4
+      statement: >
+        Every delivered file must follow the naming convention
+        LMEFTcad_yyyymmdd.zip (metal abbreviation varies).
+      source: PRD §4.2 (Job execution module)
+    - id: INV-5
+      statement: >
+        Pipeline order is strict: validation cannot proceed before download
+        completes; upload cannot proceed before validation passes.
+      source: PRD §4.4 (Dependencies)
+    - id: INV-6
+      statement: >
+        All data originates from the Corvil platform; no alternative source
+        is defined.
+      source: PRD §4.2 (Data source module)
+    - id: INV-7
+      statement: >
+        A business day is any weekday that is not a UK public holiday,
+        maintained manually.
+      source: PRD §4.2 (Data source module)
+    - id: INV-8
+      statement: >
+        The PCAP data retrieved via the API is identical to the data
+        obtainable from the Corvil web interface for the same parameters.
+      source: PRD data source module (inferred consistency guarantee)
+    - id: INV-9
+      statement: >
+        Empty files on public holidays are not treated as errors; only
+        empty files on non‑holiday business days are exceptions.
+      source: PRD §4.2 (Data notification module)
+
+  scenarios:
+    - id: SC-1
+      name: Regular daily processing
+      given:
+        - BusinessDay: 2026-05-13 (Wednesday, not a UK holiday)
+      when:
+        - Next day (2026-05-14) cron download job runs for A-FEED, FEED_A_CORE_L2_DC1
+      then:
+        - PCAP file downloaded from Corvil channel v4-DC1-AFEED-LMENet-Inside
+          and host 10.140.13.107 (multicast 224.0.240.13).
+        - File saved as LMEFTcad_20260513.zip.
+        - Validation passes (all checks pass, market state events found).
+        - File state becomes validated_pass.
+        - Upload job transfers file to distribution platform (state uploaded).
+        - Grafana dashboard updates with trading state transitions for that day.
+
+    - id: SC-2
+      name: Public holiday empty file
+      given:
+        - BusinessDay: 2026-12-25 (UK public holiday)
+        - BusinessDay.isHoliday = true
+      when:
+        - Download job runs on 2026-12-26
+      then:
+        - Retrieved PCAP file is empty (size 0).
+        - Validation detects empty file on holiday → overall = empty_normal.
+        - No alert is sent.
+        - The pipeline marks the day as processed, but no data record is generated
+          (file state may remain not_downloaded or a special “empty” terminal state).
+
+    - id: SC-3
+      name: Non‑holiday empty file exception
+      given:
+        - BusinessDay: 2026-07-15 (regular business day, not a holiday)
+      when:
+        - Download job runs on 2026-07-16 but file is empty
+      then:
+        - Validation sets emptyFile = exception_nonholiday, overall = fail.
+        - Email alert sent to business team: “please verify whether the result
+          meets expectations”.
+        - File state becomes validated_fail.
+        - Upload job is NOT triggered.
+
+    - id: SC-4
+      name: Manual API export trigger
+      given:
+        - Internal user calls GET /pcap/export?feed=LME-A-realtime
+          &messageCodes=LME_A_TEST1&businessDay=20260413.
+        - (Feed name mapping: LME-A-realtime → A-FEED; message code mapping
+          for test codes not in standard set, but illustrates flexibility.)
+      when:
+        - Call is processed
+      then:
+        - HTTP 200 returns (null) and a download Job is created in state triggered.
+        - If the job later fails, alerts are sent according to notification rules.
+
+    - id: SC-5
+      name: Validation failure alerts technical team
+      given:
+        - A downloaded PCAP has a malformed Ethernet header
+      when:
+        - Validation job runs
+      then:
+        - ValidationResult.overall = fail
+        - Technical team receives a validation failure email.
+        - File state becomes validated_fail.
+
+    - id: SC-6
+      name: Upload failure
+      given:
+        - File state is validated_pass
+      when:
+        - Upload job fails (e.g., distribution platform unreachable)
+      then:
+        - Job state becomes failed
+        - Upload failure email sent to technical team.
+        - File remains in validated_pass, allowing retry.

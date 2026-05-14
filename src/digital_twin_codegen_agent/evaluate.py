@@ -31,7 +31,7 @@ class Evaluator:
 
         user_prompt = (
             f"## Stage: {stage_name}\n\n"
-            f"## Input\n\n{input_text[:16000]}\n\n"
+            f"## Input\n\n{input_text}\n\n"
             f"## Generated Output\n\n{output_text}\n\n"
             "Evaluate the output against the input. "
             "Output your assessment in the exact format specified."
@@ -53,7 +53,7 @@ class Evaluator:
         if pass_match:
             result.passed = pass_match.group(1) == "YES"
 
-        if not pass_match and result.score >= 60:
+        if not pass_match and result.score >= 70:
             result.passed = True
 
         issues_section = re.search(r"ISSUES:\s*\n(.*?)(?:SUGGESTIONS|$)", response, re.DOTALL)

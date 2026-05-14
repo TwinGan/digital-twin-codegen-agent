@@ -22,7 +22,7 @@ IMPORTANT: The output is a TRANSFORMATION of the input, not a reproduction. Each
 
 ## Scoring
 
-Score threshold: 60/100 = PASS. Below 60 = FAIL and must be retried.
+Score threshold: 70/100 = PASS. Below 70 = FAIL and must be retried.
 - If the input is long and the output captures all key elements → score high even if some minor details are summarized.
 - A small hallucination or one missing command = deduct ~15 points.
 - Multiple missing elements or major hallucinations = score below 40.
@@ -39,6 +39,6 @@ SUGGESTIONS:
 - <another suggestion>
 ```
 
-If SCORE >= 60, PASS must be YES. If SCORE < 60, PASS must be NO.
+If SCORE >= 70, PASS must be YES. If SCORE < 70, PASS must be NO.
 Always list at least one ISSUE and one SUGGESTION.
 Suggestions must be actionable — they will be fed back to the generation agent for polishing.
